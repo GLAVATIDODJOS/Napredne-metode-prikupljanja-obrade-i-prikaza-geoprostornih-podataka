@@ -1,0 +1,132 @@
+var forest2 = 
+    /* color: #98ff00 */
+    /* shown: false */
+    ee.Geometry.Polygon(
+        [[[20.047237537751144, 45.20007939475594],
+          [20.041455098283535, 45.18897207652233],
+          [20.035474137230114, 45.18148277968606],
+          [20.01936377109154, 45.17834960964048],
+          [20.041883150767475, 45.174176911893056],
+          [20.06079669189198, 45.17314764842982],
+          [20.077426378791106, 45.1735092240432],
+          [20.075507624265484, 45.176934982099205],
+          [20.075730972116897, 45.18277972722774],
+          [20.060456451892087, 45.18985772782053]]]),
+    forest1 = 
+    /* color: #0b4a8b */
+    /* shown: false */
+    ee.Geometry.Polygon(
+        [[[20.106166439012437, 45.18990370423451],
+          [20.102418912338177, 45.17470800672358],
+          [20.13367382933589, 45.17494794603717],
+          [20.13668781023375, 45.17681169085849],
+          [20.140385373226735, 45.17819290409027],
+          [20.138853723710877, 45.17877720918456],
+          [20.13466176304461, 45.178339119596],
+          [20.129437794452343, 45.18092666341245],
+          [20.126544949384613, 45.18065605252529],
+          [20.114193923548616, 45.19050798511634],
+          [20.125933046179426, 45.190354624535004],
+          [20.129442351970468, 45.19315108954325],
+          [20.121192829757202, 45.19467727506221],
+          [20.113772162851287, 45.195217412945816],
+          [20.110095598752043, 45.19332525819909]]]),
+    nonForest1 = 
+    /* color: #ffc82d */
+    /* shown: false */
+    ee.Geometry.Polygon(
+        [[[20.056123839128606, 45.13694816596108],
+          [20.052382353145614, 45.13386691816028],
+          [20.05810925214436, 45.12567727461125],
+          [20.064529328154215, 45.12903609255178],
+          [20.06738578097881, 45.13685528018577],
+          [20.061282745853298, 45.13547900624987]]]),
+    nonForest2 = 
+    /* color: #00ffff */
+    /* shown: false */
+    ee.Geometry.Polygon(
+        [[[20.07792879959283, 45.05860737708487],
+          [20.07202769464971, 45.041824878724604],
+          [20.08591874133217, 45.041947424747924],
+          [20.095686777059687, 45.04206746368375],
+          [20.107970698553007, 45.049185377993844],
+          [20.10171604394161, 45.05824365538983],
+          [20.092391268547694, 45.05772848302429],
+          [20.08993299562207, 45.05442416421716],
+          [20.085831704554433, 45.05654643103985],
+          [20.0791337412528, 45.06345782261146]]]),
+    indjija = ee.FeatureCollection("users/zivkovicbosko2000/opstina_indjija");
+    // Define a function that scales and masks Landsat 8 surface reflectance images.
+function prepSrL8(image) {
+  // Develop masks for unwanted pixels (fill, cloud, cloud shadow).
+  var qaMask = image.select('QA_PIXEL').bitwiseAnd(parseInt('11111', 2)).eq(0);
+  var saturationMask = image.select('QA_RADSAT').eq(0);
+
+  // Apply the scaling factors to the appropriate bands.
+  var getFactorImg = function(factorNames) {
+    var factorList = image.toDictionary().select(factorNames).values();
+    return ee.Image.constant(factorList);
+  };
+  var scaleImg = getFactorImg([
+    'REFLECTANCE_MULT_BAND_.|TEMPERATURE_MULT_BAND_ST_B10']);
+  var offsetImg = getFactorImg([
+    'REFLECTANCE_ADD_BAND_.|TEMPERATURE_ADD_BAND_ST_B10']);
+  var scaled = image.select('SR_B.|ST_B10').multiply(scaleImg).add(offsetImg);
+
+  // Replace original bands with scaled bands and apply masks.
+  return image.addBands(scaled, null, true)
+    .updateMask(qaMask).updateMask(saturationMask);
+}
+
+// Make a cloud-free Landsat 8 surface reflectance composite.
+var image = ee.ImageCollection('LANDSAT/LC08/C02/T1_L2')
+  .filterDate('2018-01-01', '2019-01-01')
+  .map(prepSrL8)
+  .median();
+
+// Use these bands for prediction.
+var bands = ['SR_B2', 'SR_B3', 'SR_B4', 'SR_B5',
+             'SR_B6', 'SR_B7'];
+// Manually created polygons.
+
+// Make a FeatureCollection from the hand-made geometries.
+var polygons = ee.FeatureCollection([
+  ee.Feature(nonForest1, {'class': 0}),
+  ee.Feature(nonForest2, {'class': 0}),
+  ee.Feature(forest1, {'class': 1}),
+  ee.Feature(forest2, {'class': 1}),
+]);
+
+// Get the values for all pixels in each polygon in the training.
+var training = image.sampleRegions({
+  // Get the sample from the polygons FeatureCollection.
+  collection: polygons,
+  // Keep this list of properties from the polygons.
+  properties: ['class'],
+  // Set the scale to get Landsat pixels in the polygons.
+  scale: 30
+});
+// Create an SVM classifier with custom parameters.
+var classifier = ee.Classifier.libsvm({
+  kernelType: 'RBF',
+  gamma: 0.5,
+  cost: 10
+});
+// Train the classifier.
+var trained = classifier.train(training, 'class', bands);
+// Classify the image.
+var classified = image.classify(trained);
+// Display the classification result and the input image.
+Map.centerObject(indjija,11);
+Map.addLayer(image.clip(indjija),
+             {bands: ['SR_B4', 'SR_B3', 'SR_B2'], min: 0, max: 0.25},
+             'image');
+Map.addLayer(polygons, {color: 'yellow'}, 'training polygons');
+Map.addLayer(classified.clip(indjija),
+             {min: 0, max: 1, palette: ['orange', 'green']},
+             'deforestation');
+             
+    
+    
+    
+    
